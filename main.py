@@ -66,8 +66,7 @@ def main() -> None:
         for character in characters:
             character.update(dt)
             character.draw(screen)
-            frame_rect = character.frame.get_rect(center=character.location.rect.center)
-            if frame_rect.collidepoint(mouse_pos):
+            if character.sprite_rect.collidepoint(mouse_pos):
                 hover_target = character
 
         if hover_target:

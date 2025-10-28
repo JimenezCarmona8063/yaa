@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -41,13 +40,19 @@ class Character:
     action_timer: float = 0.0
     frame_index: float = 0.0
     animation: str = "idle"
-    speed: float = 60.0
+    speed: float = 120.0
     available: bool = True
     alert: bool = False
+    position: pygame.Vector2 = field(init=False)
+    destination_location: Optional[Location] = field(default=None, init=False)
+    path: List[pygame.Vector2] = field(default_factory=list, init=False)
+    action_started: bool = field(default=False, init=False)
+    wandering: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if not self.animations:
             self.animations = build_animation_set(self.role)
+        self.position = pygame.Vector2(self.location.rect.center)
 
     @property
     def frame(self) -> pygame.Surface:
@@ -55,20 +60,46 @@ class Character:
         index = int(self.frame_index) % len(frames)
         return frames[index]
 
+    @property
+    def sprite_rect(self) -> pygame.Rect:
+        return self.frame.get_rect(center=self.position)
+
     def assign_action(self, action: Action) -> None:
         self.current_action = action
         self.action_timer = action.duration
         self.available = False
-        self.animation = "work"
+        self.animation = "walk"
         self.frame_index = 0.0
+        self.action_started = False
+        self.wandering = False
         try:
-            self.location = self.campus_map.get_location(action.location)
+            target = self.campus_map.get_location(action.location)
         except KeyError:
-            pass
+            self.destination_location = None
+            self.path = []
+            self.action_started = True
+            self.animation = "work"
+            return
+
+        self.destination_location = target
+        self.path = self.campus_map.path_between(self.position, target)
+        if not self.path:
+            self.location = target
+            self.position = pygame.Vector2(target.rect.center)
+            self.destination_location = None
+            self.action_started = True
+            self.animation = "work"
 
     def update(self, dt: float) -> None:
         self.frame_index += dt * 6
         if self.current_action:
+            if not self.action_started:
+                if self._move_towards_destination(dt):
+                    return
+                self.action_started = True
+                self.animation = "work"
+                self.frame_index = 0.0
+            self.animation = "work"
             self.action_timer -= dt
             if self.action_timer <= 0:
                 self.complete_action(self.current_action)
@@ -76,20 +107,66 @@ class Character:
                 self.available = True
                 self.animation = "idle"
         else:
-            self.animation = "idle"
+            if self.path:
+                self._move_towards_destination(dt)
+            else:
+                self.animation = "idle"
+                if random.random() < 0.005:
+                    self.begin_wander()
 
-        if not self.current_action and random.random() < 0.005:
-            self.wander(dt)
+    def begin_wander(self) -> None:
+        destination = self.campus_map.random_location()
+        if destination == self.location:
+            return
+        self.destination_location = destination
+        self.path = self.campus_map.path_between(self.position, destination)
+        self.wandering = True
+        if not self.path:
+            self.location = destination
+            self.position = pygame.Vector2(destination.rect.center)
+            self.destination_location = None
+            self.wandering = False
 
-    def wander(self, dt: float) -> None:
+    def _move_towards_destination(self, dt: float) -> bool:
+        if not self.path:
+            self._finalize_arrival()
+            return False
+
+        target = self.path[0]
+        direction = target - self.position
+        distance = direction.length()
+        max_step = self.speed * dt
+
+        if distance <= max(1.0, max_step):
+            self.position = target
+            self.path.pop(0)
+            if not self.path:
+                self._finalize_arrival()
+                return False
+            return True
+
+        if distance != 0:
+            direction = direction.normalize()
+        self.position += direction * max_step
         self.animation = "walk"
-        self.frame_index += dt * 4
-        if random.random() < 0.02:
-            self.location = self.campus_map.random_location()
+        return True
+
+    def _finalize_arrival(self) -> None:
+        if not self.destination_location:
+            return
+        destination_center = pygame.Vector2(self.destination_location.rect.center)
+        if self.position.distance_to(destination_center) > 2:
+            return
+        self.position = destination_center
+        self.location = self.destination_location
+        self.destination_location = None
+        if self.wandering:
+            self.wandering = False
+            self.animation = "idle"
 
     def draw(self, surface: pygame.Surface) -> None:
         frame = self.frame
-        rect = frame.get_rect(center=self.location.rect.center)
+        rect = frame.get_rect(center=self.position)
         surface.blit(frame, rect)
 
     def draw_hover_panel(self, surface: pygame.Surface, position: pygame.Vector2) -> None:
@@ -107,9 +184,19 @@ class Character:
             )
 
     def get_info_lines(self) -> List[str]:
+        destination_text = ""
+        if self.current_action and not self.action_started:
+            if self.destination_location:
+                destination_text = f"Destino: {self.destination_location.name}"
+        elif self.destination_location and self.wandering:
+            destination_text = f"Rumbo a: {self.destination_location.name}"
+        else:
+            destination_text = f"Ubicación: {self.location.name}"
+
         return [
             f"Rol: {self.role}",
             f"Acción: {self.current_action.name if self.current_action else 'Disponible'}",
+            destination_text,
             f"Comido: {'Sí' if self.state.has_eaten else 'No'}",
             f"Ejercicio: {'Sí' if self.state.has_exercised else 'No'}",
             f"Ánimo: {int(self.state.mood * 100)}%",
